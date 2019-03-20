@@ -33,35 +33,38 @@ const gotoUrl =
   })
 
 class CarrefourConnector extends CookieKonnector {
-  // Initialize the HTML request options used by this konnector
+  // Initialize the HTML request options for the authentication phase
+  initAuthenticationRequestHtml() {
+    this.authenticationRequestHtml = this.requestFactory({
+      debug: false,
+      cheerio: false,
+      json: true,
+      jar: this._jar._jar,
+      resolveWithFullResponse: true
+    })
+  }
+
+  // Initialize the HTML request options for the retrieval phase
   initRequestHtml() {
     this.requestHtml = this.requestFactory({
-      // The debug mode shows all the details about HTTP requests and responses. Very useful for
-      // debugging but very verbose. This is why it is set to false by default
       debug: false,
-      // Activates [cheerio](https://cheerio.js.org/) parsing on each page
-      cheerio: false,
-      // If cheerio is activated do not forget to deactivate json parsing (which is activated by
-      // default in cozy-konnector-libs)
-      json: true,
-      // This allows request-promise to keep cookies between requests
-      jar: this._jar._jar,
-      // Activate full response to get status code
-      resolveWithFullResponse: true
+      cheerio: true,
+      json: false,
+      jar: this._jar._jar
     })
   }
 
   async authenticateRequest(url, options) {
     try {
-      return await this.requestHtml(url, options)
-    } catch (err) {
-      log('error', err.message)
-      switch (err.statusCode) {
-        case 403:
-          throw new Error(errors.CHALLENGE_ASKED)
-        default:
-          throw new Error(errors.LOGIN_FAILED)
+      let optionsWithHeader = (options ? options : {})
+      optionsWithHeader.headers = {
+        'X-Requested-With': 'XMLHttpRequest',
+        'Accept-API-Version': 'protocol=1.0,resource=2.0',
+        'TE': 'Trailers'
       }
+      return await this.authenticationRequestHtml(url, optionsWithHeader)
+    } catch (err) {
+      checkError(err)
     }
   }
 
@@ -94,7 +97,7 @@ class CarrefourConnector extends CookieKonnector {
   // Test if a session stored in the cookies can be used to connect
   async testSession() {
     try {
-      const getId = await this.requestHtml(
+      const getId = await this.authenticationRequestHtml(
         `${myAccountBaseUrl}/iam/json/users`,
         {
           method: 'POST',
@@ -166,9 +169,32 @@ class CarrefourConnector extends CookieKonnector {
     await this.finalizeAuthentication(getId.body.id)
   }
 
+  async getDocumentsList() {
+    try {
+      return await this.requestHtml(`${baseUrl}/mon-compte/commandes`)
+    } catch (err) {
+      checkError(err)
+    }
+  }
+
+  async parseDocuments(ordersList) {
+    log('debug', ordersList)
+    const orders = scrape(
+      ordersList,
+      {
+        orders: {
+          sel: 'orders-delivered'
+        }
+      },
+      '#order-summary'
+    )
+    log('debug', orders)
+  }
+
   // Main function
   async fetch(fields) {
-    // Initialize the request
+    // Initialize the requests
+    this.initAuthenticationRequestHtml()
     this.initRequestHtml()
     // Check if the stored session can be used
     if (!(await this.testSession())) {
@@ -176,9 +202,22 @@ class CarrefourConnector extends CookieKonnector {
       await this.authenticate(fields.login, fields.password)
       log('info', 'Successfully logged in')
     }
+    // Retrieve the orders list
+    const docs = this.getDocumentsList()
+    this.parseDocuments(docs)
   }
 }
 
 // Create and run the konnector
 const connector = new CarrefourConnector()
 connector.run()
+
+function checkError(err) {
+  log('error', err.message)
+  switch (err.statusCode) {
+    case 403:
+      throw new Error(errors.CHALLENGE_ASKED)
+    default:
+      throw new Error(errors.LOGIN_FAILED)
+  }
+}
